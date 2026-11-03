@@ -44,6 +44,7 @@ import {
   syncDocumentElectronPlatformClasses,
   syncDocumentWindowControlsOverlayClass,
 } from "./lib/windowControlsOverlay";
+import { onAssumedDesktopGateRefuted } from "./environments/primary";
 import { startProviderAuthDelivery } from "./providerAuthDelivery";
 import { getRouter, type AppRouter } from "./router";
 import { appAtomRegistry } from "./rpc/atomRegistry";
@@ -192,6 +193,7 @@ export function startAppServices(): AppRouter {
   installCommandPaletteCommands(router);
   registerOpenFavoriteEditorCommand();
   startThreadOverlayRetention(router);
+  onAssumedDesktopGateRefuted(() => void router.invalidate());
   // Drafts promote as their server threads arrive, wherever the user is.
   subscribeDraftThreadPromotion({
     registry: appAtomRegistry,

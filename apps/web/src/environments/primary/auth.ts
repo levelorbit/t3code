@@ -21,6 +21,7 @@ import {
 
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
 import { runPrimaryHttp } from "../../lib/runtime";
+import { hasRememberedPrimaryRegistration } from "./rememberedRegistration";
 
 const PrimaryEnvironmentRequestOperation = Schema.Literals([
   "fetch-session-state",
@@ -137,6 +138,17 @@ type ServerAuthGateState =
 
 let bootstrapPromise: Promise<ServerAuthGateState> | null = null;
 let resolvedAuthenticatedGateState: ServerAuthGateState | null = null;
+let desktopGateAssumed = false;
+let assumedDesktopCheck: Promise<ServerAuthGateState> | null = null;
+// The refuted check's outcome, handed to the re-run gate so it does not wait for a second check.
+let refutedDesktopCheck: Promise<ServerAuthGateState> | null = null;
+const assumedDesktopGateRefutedListeners = new Set<() => void>();
+
+/** Called when the session check behind an assumed desktop gate fails, so the router can re-check. */
+export function onAssumedDesktopGateRefuted(listener: () => void): () => void {
+  assumedDesktopGateRefutedListeners.add(listener);
+  return () => assumedDesktopGateRefutedListeners.delete(listener);
+}
 let explicitPairingRequested = false;
 const AUTH_SESSION_ESTABLISH_TIMEOUT_MS = 2_000;
 const AUTH_SESSION_ESTABLISH_STEP_MS = 100;
@@ -437,12 +449,19 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
   }
 
   const urlCredential = takePairingTokenFromUrl();
+  if (refutedDesktopCheck !== null && !urlCredential) {
+    const refuted = refutedDesktopCheck;
+    refutedDesktopCheck = null;
+    return refuted;
+  }
   const previousPromise = bootstrapPromise;
   if (urlCredential) {
     resolvedAuthenticatedGateState = null;
   } else {
     if (previousPromise) {
-      return previousPromise;
+      return previousPromise === assumedDesktopCheck
+        ? { status: "authenticated" }
+        : previousPromise;
     }
 
     if (resolvedAuthenticatedGateState?.status === "authenticated") {
@@ -459,7 +478,7 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
         })
     : bootstrapServerAuth(urlCredential);
   bootstrapPromise = nextPromise;
-  return nextPromise
+  const settled = nextPromise
     .then((result) => {
       if (bootstrapPromise === nextPromise && result.status === "authenticated") {
         resolvedAuthenticatedGateState = result;
@@ -471,9 +490,45 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
         bootstrapPromise = null;
       }
     });
+  // The desktop mints this credential itself, and the session check waits for its backend to
+  // boot. Cached state renders meanwhile; a failed check sends the router through the real gate.
+  if (!desktopGateAssumed && !urlCredential && canAssumeDesktopGate()) {
+    desktopGateAssumed = true;
+    assumedDesktopCheck = nextPromise;
+    const refute = () => {
+      for (const listener of assumedDesktopGateRefutedListeners) listener();
+    };
+    settled.then(
+      (result) => {
+        assumedDesktopCheck = null;
+        if (result.status === "authenticated") return;
+        refutedDesktopCheck = settled;
+        refute();
+      },
+      () => {
+        assumedDesktopCheck = null;
+        refutedDesktopCheck = settled;
+        refute();
+      },
+    );
+    return { status: "authenticated" };
+  }
+  return settled;
+}
+
+// Without a remembered primary there is no cached state to show, and first-run checks need the backend.
+function canAssumeDesktopGate(): boolean {
+  return (
+    typeof window.desktopBridge?.getLocalEnvironmentBearerToken === "function" &&
+    hasRememberedPrimaryRegistration()
+  );
 }
 
 export function __resetServerAuthBootstrapForTests() {
+  desktopGateAssumed = false;
+  assumedDesktopCheck = null;
+  refutedDesktopCheck = null;
+  assumedDesktopGateRefutedListeners.clear();
   bootstrapPromise = null;
   resolvedAuthenticatedGateState = null;
   explicitPairingRequested = false;

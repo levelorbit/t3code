@@ -46,6 +46,11 @@ import { APP_VERSION } from "../branding";
 import { readDesktopPrimaryBearerToken } from "../environments/primary/desktopAuth";
 import * as PrimaryEnvironmentHttpLayer from "../environments/primary/httpLayer";
 import {
+  primaryRegistrationSignature,
+  recallPrimaryRegistration,
+  rememberPrimaryRegistration,
+} from "../environments/primary/rememberedRegistration";
+import {
   readPrimaryEnvironmentTarget,
   type PrimaryEnvironmentTarget,
 } from "../environments/primary/target";
@@ -146,6 +151,17 @@ const layerWakeups = Wakeups.layer({
         Stream.map(() => "credentials-changed" as const),
       ),
       networkPathChanges,
+      // Ends a connection backoff begun while the desktop backend booted; the token resolves at readiness.
+      Stream.suspend(() =>
+        window.desktopBridge?.getLocalEnvironmentBearerToken === undefined ||
+        isLocalEnvironmentDisabled()
+          ? Stream.empty
+          : Stream.fromEffect(
+              Effect.tryPromise(readDesktopPrimaryBearerToken).pipe(
+                Effect.as("local-backend-ready" as const),
+              ),
+            ).pipe(Stream.catch(() => Stream.empty)),
+      ),
     ],
     { concurrency: "unbounded" },
   ),
@@ -368,7 +384,21 @@ const layerCapabilities = Layer.effectContext(
             reason: "remote-unavailable",
             detail: `Could not load the desktop primary credential: ${String(cause)}`,
           }),
-      }).pipe(Effect.map(Option.fromNullishOr)),
+      }).pipe(
+        // The desktop answers once its backend is ready. Failing inside the 15 s setup budget
+        // reads as starting rather than a dead host; the local-backend-ready wakeup retries.
+        Effect.timeoutOrElse({
+          duration: "10 seconds",
+          orElse: () =>
+            Effect.fail(
+              new ConnectionTransientError({
+                reason: "backend-starting",
+                detail: "The local T3 Code server is still starting.",
+              }),
+            ),
+        }),
+        Effect.map(Option.fromNullishOr),
+      ),
     });
     const ssh = ClientCapabilities.SshEnvironmentGateway.of({
       provision: Effect.fn("web.connectionPlatform.ssh.provision")(
@@ -545,6 +575,17 @@ export function primaryRegistrationToRetainAfterTopologyRead(
   return topologyRead._tag === "Failure" ? previous.get(PRIMARY_LOCAL_ENVIRONMENT_ID) : undefined;
 }
 
+/** Keeps the cached sidebar of a recalled primary while its backend is still booting. */
+export function primaryRegistrationToRetainAfterRefreshFailure(
+  cached: CachedPlatformRegistration | undefined,
+  signature: string,
+): CachedPlatformRegistration | undefined {
+  const recalled =
+    cached?.registration._tag === "PrimaryConnectionRegistration" &&
+    cached.registration.unconfirmed === true;
+  return recalled && cached.signature === signature ? cached : undefined;
+}
+
 export function canReuseCachedPlatformRegistration(
   cached: CachedPlatformRegistration,
   signature: string,
@@ -654,14 +695,31 @@ const layerPlatformConnectionSource = Layer.effect(
         });
       } else if (primaryTopologyRead.target !== null) {
         const primaryTarget = primaryTopologyRead.target;
-        const signature = `primary|${primaryTarget.target.httpBaseUrl}|${primaryTarget.target.wsBaseUrl}`;
+        const signature = primaryRegistrationSignature(primaryTarget);
         const cached = previous.get(PRIMARY_LOCAL_ENVIRONMENT_ID);
-        if (
-          cached !== undefined &&
-          canReuseCachedPlatformRegistration(cached, signature, nowEpochMs)
-        ) {
-          next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cached);
-          registrations.push(cached.registration);
+        const reusable =
+          cached !== undefined && canReuseCachedPlatformRegistration(cached, signature, nowEpochMs)
+            ? cached
+            : undefined;
+        const remembered =
+          cached === undefined ? recallPrimaryRegistration(primaryTarget) : undefined;
+        if (reusable !== undefined) {
+          next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, reusable);
+          registrations.push(reusable.registration);
+        } else if (remembered !== undefined) {
+          // If the backend answers with another id (a WSL fallback, a reset home), the connection
+          // fails its id check and the next poll's fetch replaces this; the registry keeps its data.
+          const registration = new PrimaryConnectionRegistration({
+            target: remembered.target,
+            unconfirmed: true,
+          });
+          const cacheEntry = {
+            signature,
+            registration,
+            refreshAtEpochMs: 0,
+          };
+          next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cacheEntry);
+          registrations.push(registration);
         } else {
           const built = yield* loadPrimaryConnectionRegistration(primaryTarget).pipe(
             Effect.tapError((error) =>
@@ -673,6 +731,13 @@ const layerPlatformConnectionSource = Layer.effect(
             const cacheEntry = { signature, registration: built.value };
             next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, cacheEntry);
             registrations.push(built.value);
+            rememberPrimaryRegistration(primaryTarget, built.value);
+          } else {
+            const retained = primaryRegistrationToRetainAfterRefreshFailure(cached, signature);
+            if (retained !== undefined) {
+              next.set(PRIMARY_LOCAL_ENVIRONMENT_ID, retained);
+              registrations.push(retained.registration);
+            }
           }
         }
       }

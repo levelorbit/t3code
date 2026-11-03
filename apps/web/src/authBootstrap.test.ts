@@ -1,5 +1,6 @@
 import {
   EnvironmentAuthInvalidError,
+  EnvironmentId,
   type AuthBrowserSessionResult,
   type AuthCreatePairingCredentialInput,
   type AuthSessionState,
@@ -10,7 +11,12 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import {
+  PrimaryConnectionRegistration,
+  PrimaryConnectionTarget,
+} from "@t3tools/client-runtime/connection";
 import { installEnvironmentHttpTest } from "../test/environmentHttpTest";
+import { encodeRememberedPrimaryRegistration } from "./environments/primary/rememberedRegistration";
 import { __setPrimaryHttpRunnerForTests } from "./lib/runtime";
 
 type TestWindow = {
@@ -20,6 +26,7 @@ type TestWindow = {
     replaceState: (_data: unknown, _unused: string, url?: string) => void;
   };
   desktopBridge?: DesktopBridge;
+  localStorage?: Pick<Storage, "getItem">;
 };
 
 const LOOPBACK_AUTH = {
@@ -163,6 +170,91 @@ describe("resolveInitialServerAuthGateState", () => {
 
     expect(testApi.calls.session).toBe(2);
     expect(testApi.calls.browserSession).toEqual([{ credential: "desktop-bootstrap-token" }]);
+  });
+
+  const installDesktopPrimary = (remembered: boolean) => {
+    const testWindow = installTestBrowser("http://localhost/");
+    const bootstraps = [
+      {
+        id: "primary",
+        label: "Local",
+        httpBaseUrl: "http://localhost:3773",
+        wsBaseUrl: "ws://localhost:3773",
+      },
+    ];
+    testWindow.desktopBridge = {
+      getLocalEnvironmentEnabled: () => true,
+      getLocalEnvironmentBearerToken: () => Promise.resolve("desktop-bearer"),
+      getLocalEnvironmentBootstraps: () => bootstraps,
+    } as unknown as DesktopBridge;
+    const key = "primary|http://localhost:3773/|ws://localhost:3773/|Local";
+    const stored = encodeRememberedPrimaryRegistration(
+      key,
+      new PrimaryConnectionRegistration({
+        target: new PrimaryConnectionTarget({
+          environmentId: EnvironmentId.make("env-local"),
+          label: "Local",
+          httpBaseUrl: "http://localhost:3773/",
+          wsBaseUrl: "ws://localhost:3773/",
+        }),
+      }),
+    );
+    testWindow.localStorage = { getItem: () => (remembered ? (stored ?? null) : null) };
+  };
+
+  it("renders a remembered desktop primary before its session check finishes", async () => {
+    const backendReady = createSignal();
+    const testApi = await installEnvironmentHttpTest({
+      session: () =>
+        Effect.promise(() => backendReady.promise).pipe(
+          Effect.as(unauthenticatedSession(DESKTOP_AUTH)),
+        ),
+    });
+    disposeHttpTest = testApi.dispose;
+    installDesktopPrimary(true);
+
+    const { onAssumedDesktopGateRefuted, resolveInitialServerAuthGateState } =
+      await import("./environments/primary");
+    const refuted = createSignal();
+    onAssumedDesktopGateRefuted(refuted.resolve);
+
+    // Navigations while the backend boots keep the cached app instead of stalling.
+    await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+      status: "authenticated",
+    });
+    await expect(resolveInitialServerAuthGateState()).resolves.toEqual({
+      status: "authenticated",
+    });
+
+    backendReady.resolve();
+    await refuted.promise;
+    await expect(resolveInitialServerAuthGateState()).resolves.toMatchObject({
+      status: "requires-auth",
+    });
+    // The re-run gate reuses the refuted check instead of waiting for another one.
+    expect(testApi.calls.session).toBe(1);
+  });
+
+  it("waits for the session check when no desktop primary is remembered", async () => {
+    const backendReady = createSignal();
+    const testApi = await installEnvironmentHttpTest({
+      session: () =>
+        Effect.promise(() => backendReady.promise).pipe(
+          Effect.as(authenticatedSession(DESKTOP_AUTH)),
+        ),
+    });
+    disposeHttpTest = testApi.dispose;
+    installDesktopPrimary(false);
+
+    const { resolveInitialServerAuthGateState } = await import("./environments/primary");
+    let settled = false;
+    const gate = resolveInitialServerAuthGateState().finally(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    backendReady.resolve();
+    await expect(gate).resolves.toEqual({ status: "authenticated" });
   });
 
   it("takes a pairing token from the location hash and strips it immediately", async () => {

@@ -14,6 +14,8 @@ import { ClientCapabilities } from "@t3tools/client-runtime/platform";
 import {
   ConnectionBlockedError,
   ConnectionTransientError,
+  PrimaryConnectionRegistration,
+  PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
 
 import {
@@ -23,6 +25,7 @@ import {
   isRejectedBootstrapCredentialError,
   isRejectedSecondaryBootstrap,
   nextRejectedSecondaryBootstrap,
+  primaryRegistrationToRetainAfterRefreshFailure,
   primaryRegistrationToRetainAfterTopologyRead,
   prepareDesktopSshEnvironment,
   provisionDesktopSshEnvironment,
@@ -448,5 +451,30 @@ describe("primary topology cache", () => {
         cause: new Error("IPC unavailable"),
       }),
     ).toBe(cached);
+  });
+
+  it("keeps only a recalled primary through a failed refresh", () => {
+    const signature = cached.signature;
+    const target = new PrimaryConnectionTarget({
+      environmentId: EnvironmentId.make("env-local"),
+      label: "Local",
+      httpBaseUrl: "http://127.0.0.1:3773/",
+      wsBaseUrl: "ws://127.0.0.1:3773/",
+    });
+    const recalled = {
+      signature,
+      registration: new PrimaryConnectionRegistration({ target, unconfirmed: true }),
+    };
+    expect(primaryRegistrationToRetainAfterRefreshFailure(recalled, signature)).toBe(recalled);
+    expect(
+      primaryRegistrationToRetainAfterRefreshFailure(
+        { signature, registration: new PrimaryConnectionRegistration({ target }) },
+        signature,
+      ),
+    ).toBeUndefined();
+    expect(
+      primaryRegistrationToRetainAfterRefreshFailure(recalled, "primary|http://127.0.0.1:3774/|"),
+    ).toBeUndefined();
+    expect(primaryRegistrationToRetainAfterRefreshFailure(undefined, signature)).toBeUndefined();
   });
 });

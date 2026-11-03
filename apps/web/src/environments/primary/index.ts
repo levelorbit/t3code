@@ -1,5 +1,6 @@
 export {
   createServerPairingCredential,
+  onAssumedDesktopGateRefuted,
   peekPairingTokenFromUrl,
   PrimaryEnvironmentPairingCredentialRejectedError,
   PrimaryEnvironmentRequestError,
