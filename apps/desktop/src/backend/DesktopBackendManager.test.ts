@@ -496,6 +496,8 @@ describe("DesktopBackendManager", () => {
         assert.isTrue(Option.isNone(yield* instance.currentConfig));
 
         yield* instance.start;
+        // Bootstrap creates the window right after start; the spawn must not wait behind it.
+        assert.equal(startCount, 1);
         assert.equal(yield* Queue.take(startedPids), 123);
         yield* Deferred.await(ready);
         assert.isTrue(yield* Ref.get(backendReadyFlag));
@@ -586,6 +588,31 @@ describe("DesktopBackendManager", () => {
         const restarted = yield* instance.snapshot;
         assert.equal(restarted.desiredRunning, true);
         assert.deepEqual(restarted.activePid, Option.some(123));
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect("returns from start when the backend cannot spawn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const instance = yield* makeTestInstance({
+          spawnerLayer: Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "ChildProcess",
+                  method: "spawn",
+                  pathOrDescriptor: "/electron",
+                }),
+              ),
+            ),
+          ),
+          httpClientLayer: layerHttpClient(() => Effect.never),
+        });
+        yield* instance.start;
+        assert.isTrue(Option.isNone((yield* instance.snapshot).activePid));
       }).pipe(Effect.provide(TestClock.layer())),
     ),
   );

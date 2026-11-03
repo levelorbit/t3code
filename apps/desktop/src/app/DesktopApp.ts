@@ -185,9 +185,8 @@ const bootstrap = Effect.gen(function* () {
     yield* (yield* DesktopAppIdentity.DesktopAppIdentity).resolveUserDataPath,
   );
 
-  yield* snapShot.initialize;
-
   if (!settings.localEnvironmentEnabled) {
+    yield* snapShot.initialize;
     yield* logBootstrapInfo("bootstrap skipping local environment (disabled in settings)");
     if (!(yield* Ref.get(state.quitting))) {
       yield* desktopWindow.createMainIfBackendReady;
@@ -243,8 +242,12 @@ const bootstrap = Effect.gen(function* () {
     if (settings.wslOnly === true && settings.wslBackendEnabled === true) {
       yield* desktopWindow.showConnectingSplash;
     }
+    // The backend is the slowest part of launch, so it boots while SnapShot registers.
     yield* primaryBackend.start;
     yield* logBootstrapInfo("bootstrap backend start requested");
+  }
+  yield* snapShot.initialize;
+  if (!(yield* Ref.get(state.quitting))) {
     // WSL-only fallback can change the primary endpoint before readiness.
     const config = yield* primaryBackend.currentConfig;
     if (

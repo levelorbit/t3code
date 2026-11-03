@@ -1,5 +1,6 @@
 import * as Brand from "effect/Brand";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -37,6 +38,9 @@ const MAX_PREFLIGHT_FAILURE_ATTEMPTS = 5;
 // Large state databases can take over a minute to become ready.
 const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(3);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
+// Most launches are ready within two seconds; probing faster there trims the wait after readiness.
+const FAST_BACKEND_READINESS_INTERVAL = Duration.millis(20);
+const FAST_BACKEND_READINESS_WINDOW = Duration.seconds(2);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 // Match the service launcher's grace period so backends can stop provider sessions.
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(5);
@@ -326,6 +330,8 @@ const waitForHttpReady = (
     path: BACKEND_READINESS_PATH,
     timeoutMs: Duration.toMillis(options.timeout),
     intervalMs: Duration.toMillis(DEFAULT_BACKEND_READINESS_INTERVAL),
+    fastIntervalMs: Duration.toMillis(FAST_BACKEND_READINESS_INTERVAL),
+    fastWindowMs: Duration.toMillis(FAST_BACKEND_READINESS_WINDOW),
     probeTimeoutMs: Duration.toMillis(DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT),
     makeError: ({ cause }) =>
       new BackendReadinessTimeoutError({
@@ -672,6 +678,8 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
     });
   });
 
+  // Resolves once the process is spawned or its run ends, so callers' synchronous work (window
+  // creation) cannot delay the spawn. Awaited outside the mutex because finalizeRun takes it.
   const start: Effect.Effect<void> = Effect.suspend(() =>
     mutex.withPermits(1)(
       Effect.gen(function* () {
@@ -798,6 +806,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           },
         ]);
 
+        const spawned = yield* Deferred.make<void>();
         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
           reason: string,
           exitCode?: number,
@@ -898,6 +907,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               ...run,
               pid: Option.some(pid),
             }));
+            yield* Deferred.succeed(spawned, undefined);
             yield* Ref.set(outputTail, "");
             outputDecoders = makeOutputDecoders();
             yield* backendOutputLog.beginSession({
@@ -974,9 +984,18 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
           ...run,
           fiber: Option.some(fiber),
         }));
+        return { spawned, fiber };
       }),
     ),
-  ).pipe(Effect.withSpan("desktop.backendInstance.start", { attributes: { id: spec.id } }));
+  ).pipe(
+    // A run that ends without spawning (failed spawn, interrupted) releases start too.
+    Effect.flatMap((run) =>
+      run === undefined
+        ? Effect.void
+        : Effect.raceFirst(Deferred.await(run.spawned), Fiber.await(run.fiber).pipe(Effect.asVoid)),
+    ),
+    Effect.withSpan("desktop.backendInstance.start", { attributes: { id: spec.id } }),
+  );
 
   const scheduleRestart = Effect.fn("desktop.backendInstance.scheduleRestart")(function* (
     reason: string,
