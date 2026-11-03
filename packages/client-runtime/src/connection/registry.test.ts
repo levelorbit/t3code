@@ -1598,6 +1598,55 @@ describe("EnvironmentRegistry", () => {
     }),
   );
 
+  it.effect("clears a removed primary's data only once a fetched registration confirmed it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.reconcilePlatform([
+          new PrimaryConnectionRegistration({ target: TARGET, unconfirmed: true }),
+        ]);
+        yield* registry.reconcilePlatform([]);
+        expect(yield* Ref.get(harness.ownedDataClears)).toEqual([]);
+
+        yield* registry.reconcilePlatform([
+          new PrimaryConnectionRegistration({ target: TARGET, unconfirmed: true }),
+        ]);
+        yield* registry.reconcilePlatform([new PrimaryConnectionRegistration({ target: TARGET })]);
+        yield* registry.reconcilePlatform([]);
+        expect(yield* Ref.get(harness.ownedDataClears)).toEqual([TARGET.environmentId]);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect("leaves a saved registration alone when a recalled primary shares its id", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness([TARGET]);
+
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        const saved = (yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId);
+        yield* registry.reconcilePlatform([
+          new PrimaryConnectionRegistration({
+            target: new PrimaryConnectionTarget({
+              ...TARGET,
+              httpBaseUrl: "http://127.0.0.1:4000/",
+              wsBaseUrl: "ws://127.0.0.1:4000/",
+            }),
+            unconfirmed: true,
+          }),
+        ]);
+        yield* registry.reconcilePlatform([]);
+
+        expect((yield* SubscriptionRef.get(registry.entries)).get(TARGET.environmentId)).toEqual(
+          saved,
+        );
+        expect(yield* Ref.get(harness.ownedDataClears)).toEqual([]);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
   it.effect("applies overlapping platform snapshots in order", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();

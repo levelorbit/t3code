@@ -273,6 +273,9 @@ export const make = Effect.gen(function* () {
     ReadonlyMap<EnvironmentId, EnvironmentServiceScope>
   >(new Map());
   const platformEnvironmentIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
+  // A recalled id can belong to another backend (Windows vs WSL) or a reset home, so removing
+  // it before a fetched registration confirms it leaves its data and permissions alone.
+  const unconfirmedPlatformIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
   const persistedEnvironmentIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(
     new Set(persistedRoutesByEnvironment.keys()),
   );
@@ -637,7 +640,13 @@ export const make = Effect.gen(function* () {
               pullRequestRoutingConnectionKey(registered)
               ? { ...registered, ...unsupportedState(previous) }
               : registered;
+          const unconfirmed =
+            registration._tag === "PrimaryConnectionRegistration" &&
+            registration.unconfirmed === true;
           const persisted = (yield* Ref.get(persistedEnvironmentIds)).has(target.environmentId);
+          // Only a confirmed id may take over a saved registration of the same environment;
+          // the saved one already shows that environment's cached state.
+          if (unconfirmed && persisted) return true;
           if (
             persisted ||
             (previous !== undefined &&
@@ -660,6 +669,12 @@ export const make = Effect.gen(function* () {
           yield* Ref.update(platformEnvironmentIds, (current) => {
             const next = new Set(current);
             next.add(target.environmentId);
+            return next;
+          });
+          yield* Ref.update(unconfirmedPlatformIds, (current) => {
+            const next = new Set(current);
+            if (unconfirmed) next.add(target.environmentId);
+            else next.delete(target.environmentId);
             return next;
           });
 
@@ -764,7 +779,10 @@ export const make = Effect.gen(function* () {
         environmentId,
         Effect.gen(function* () {
           const entry = (yield* SubscriptionRef.get(entries)).get(environmentId);
-          const revoked = yield* pullRequestRoutingPermissions.forget(environmentId).pipe(
+          const unconfirmed = (yield* Ref.get(unconfirmedPlatformIds)).has(environmentId);
+          const revoked = yield* (
+            unconfirmed ? Effect.void : pullRequestRoutingPermissions.forget(environmentId)
+          ).pipe(
             Effect.tapError((error) =>
               Effect.logWarning(
                 "Could not clear pull request routing permission after platform removal.",
@@ -778,6 +796,11 @@ export const make = Effect.gen(function* () {
           );
           if (Exit.isFailure(revoked)) return false;
           yield* Ref.update(platformEnvironmentIds, (current) => {
+            const next = new Set(current);
+            next.delete(environmentId);
+            return next;
+          });
+          yield* Ref.update(unconfirmedPlatformIds, (current) => {
             const next = new Set(current);
             next.delete(environmentId);
             return next;
@@ -798,6 +821,7 @@ export const make = Effect.gen(function* () {
               ),
             );
           }
+          if (unconfirmed) return true;
           yield* Effect.all(
             [
               cache.clear(environmentId).pipe(

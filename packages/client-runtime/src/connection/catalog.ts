@@ -71,6 +71,8 @@ export class PrimaryConnectionRegistration extends Schema.TaggedClass<PrimaryCon
   "PrimaryConnectionRegistration",
   {
     target: PrimaryConnectionTarget,
+    /** Recalled from a previous launch; removing it before a fetched registration confirms it keeps its data. */
+    unconfirmed: Schema.optionalKey(Schema.Literal(true)),
   },
 ) {}
 
