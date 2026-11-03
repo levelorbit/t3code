@@ -7,6 +7,7 @@ export type ConnectionWakeup =
   | "application-active-probe"
   | "application-active-long"
   | "credentials-changed"
+  | "local-backend-ready"
   | "network-changed";
 
 function isApplicationActiveWakeup(reason: ConnectionWakeup): boolean {

@@ -52,6 +52,7 @@ interface Located {
     | "outdated"
     | "released"
     | "session_pending"
+    | "backend_starting"
     | null;
   /** The failure named no hop, so the hops before this one were never probed. */
   readonly guessed?: true;
@@ -72,6 +73,9 @@ function locate(input: ConnectionDiagnosisInput): Located | null {
   }
   if (failure?.reason === "session-pending") {
     return { hop: "device", cause: "session_pending" };
+  }
+  if (failure?.reason === "backend-starting") {
+    return { hop: "server", cause: "backend_starting" };
   }
   if (failure?.hop !== undefined) {
     return { hop: failure.hop, cause: failure.failureCause ?? null };
@@ -101,6 +105,8 @@ function headline(host: string, located: Located, failure: ConnectionAttemptErro
       return "This device is offline";
     case "session_pending":
       return "This device is still loading its T3 Connect sign-in";
+    case "backend_starting":
+      return `T3 Code on ${host} is still starting`;
     case "outdated":
       return `${host} runs an older T3 Code`;
     case "clock_skew":
@@ -163,6 +169,8 @@ function steps(host: string, located: Located, failure: ConnectionAttemptError |
         "Wait a moment. T3 Code retries on its own.",
         "If it keeps waiting, reload or restart T3 Code on this device.",
       ];
+    case "backend_starting":
+      return ["Wait a moment. T3 Code connects as soon as it is ready."];
     case "outdated":
       return [`Update T3 Code on ${host}.`];
     case "clock_skew":
@@ -254,6 +262,7 @@ function helpSection(
       return "the-hosts-tunnel-is-offline";
     case "origin_unreachable":
     case "invalid_response":
+    case "backend_starting":
       return "the-tunnel-works-but-t3-code-does-not-answer";
     case "dns":
     case "tls":

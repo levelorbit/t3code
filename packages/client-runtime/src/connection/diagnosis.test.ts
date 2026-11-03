@@ -146,6 +146,16 @@ describe("presentConnectionDiagnosis", () => {
     );
   });
 
+  it("says a booting local server is starting, not that it did not answer", () => {
+    const failure = new ConnectionTransientError({
+      reason: "backend-starting",
+      detail: "The local T3 Code server is still starting.",
+    });
+    const diagnosis = diagnose(backoff(failure), "direct");
+    expect(diagnosis?.headline).toBe("T3 Code on Mac mini is still starting");
+    expect(diagnosis?.steps).toEqual(["Wait a moment. T3 Code connects as soon as it is ready."]);
+  });
+
   it("does not report hops as working when the failure names none", () => {
     const failure = new ConnectionBlockedError({
       reason: "authentication",
